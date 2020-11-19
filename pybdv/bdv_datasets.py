@@ -318,12 +318,14 @@ class BdvDatasetWithStitching(BdvDataset):
         if unique:
             raise NotImplementedError
 
-        position = [d.start for d in dd]
+        position = np.array([d.start for d in dd])
         shp = [d.stop - d.start for d in dd]
         assert list(volume.shape) == shp
 
-        halo = self._halo
+        halo = np.array(self._halo)
         data_path = self._path
+
+        position = position + halo
 
         path_in_file = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
 
@@ -376,7 +378,7 @@ class BdvDatasetWithStitching(BdvDataset):
 
         # Update the maximum label
         if self._update_max_id:
-            self.set_max_id(int(volume.max()))
+            self.set_max_id(int(volume.max()), compare_with_present=True)
 
         return dd, volume
 
