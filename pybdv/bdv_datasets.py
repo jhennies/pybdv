@@ -4,7 +4,9 @@ import numpy as np
 import json
 from .util import open_file, get_scale_factors, get_key, HDF5_EXTENSIONS
 from .converter import make_bdv
+from .stitching_utils import load_with_zero_padding, get_non_fully_contained_ids, relabel_with_skip_ids
 from shutil import rmtree
+from warnings import warn
 
 
 def _check_for_out_of_bounds(position, volume, full_shape, verbose=False):
@@ -208,9 +210,51 @@ class BdvDataset:
 # TODO Implement this one that includes stitching operations
 class BdvDatasetWithStitching(BdvDataset):
 
-    def __init__(self, path, timepoint, setup_id, downscale_mode='interpolate', n_threads=1, halo=None, verbose=False):
+    # Use 'crop' for normal images, 'flow' for supervoxels, and 'iou' for segmentations
+    STITCHING_METHODS = ['crop', 'flow', 'iou']
+
+    def __init__(
+            self,
+            path,
+            timepoint,
+            setup_id,
+            downscale_mode='mean',
+            halo=None,
+            stitch_method='crop',
+            stitch_kwargs={},
+            unique=False,
+            update_max_id=False,
+            n_threads=1,
+            verbose=False
+    ):
+
+        assert stitch_method in self.STITCHING_METHODS
+        assert downscale_mode == 'nearest' or stitch_method == 'crop', 'Downscale mode does not match the stitching ' \
+                                                                       'method'
+        assert downscale_mode == 'nearest' or not unique, \
+            'Unique label stitching methods only work with nearest downsampling mode'
 
         self._halo = halo
+        self._stitch_method = stitch_method
+        self._stitch_kwargs = stitch_kwargs
+        self._update_max_id = update_max_id
+        self._unique = unique
+
+        if unique:
+            warn('Using unique stitching: update_max_id set to True')
+            self._update_max_id = True
+        if stitch_method in ['flow', 'iou']:
+            warn(f'Using {stitch_method}: update_max_id set to True')
+            self._update_max_id = True
+
+        if stitch_method == 'crop':
+            self._stitch_func = self._crop
+        elif stitch_method == 'flow':
+            self._stitch_func = self._flow
+        elif stitch_method == 'iou':
+            raise NotImplementedError
+        else:
+            raise ValueError
 
         super().__init__(path, timepoint, setup_id, downscale_mode=downscale_mode, n_threads=n_threads, verbose=verbose)
 
@@ -220,9 +264,126 @@ class BdvDatasetWithStitching(BdvDataset):
         """
         self._halo = halo
 
+    def set_max_id(self, idx, compare_with_present=False):
+        """
+        Use this to update the largest present id in the dataset if you employ a stitching method with unique == True.
+        The id is automatically updated if new data is written.
+        """
+        data_path = self._path
+        with open_file(data_path, 'a') as f:
+            key = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
+            if not compare_with_present or f[key].attrs['maxId'] < idx:
+                f[key].attrs['maxId'] = idx
+
+    def get_max_id(self):
+        data_path = self._path
+        with open_file(data_path, 'r') as f:
+            key = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
+            max_id = f[key].attrs['maxId']
+        return max_id
+
+    def _crop(self, dd, volume, unique):
+        """
+        Technically not a stitching method.
+        Just crops the relevant data, while completely ignoring what is in the halo.
+        """
+
+        if unique:
+            raise NotImplementedError
+
+        position = [d.start for d in dd]
+        shp = [d.stop - d.start for d in dd]
+        assert list(volume.shape) == shp
+
+        halo = self._halo
+
+        volume = volume[
+                 halo[0]: -halo[0],
+                 halo[1]: -halo[1],
+                 halo[2]: -halo[2]
+                 ]
+
+        dd = np.s_[
+            position[0] + halo[0]: position[0] + shp[0] - halo[0],
+            position[1] + halo[1]: position[1] + shp[1] - halo[1],
+            position[2] + halo[2]: position[2] + shp[2] - halo[2]
+        ]
+
+        return dd, volume
+
+    def _flow(self, dd, volume, unique):
+
+        assert 0 not in volume, 'The zero label is reserved for the background!'
+
+        if unique:
+            raise NotImplementedError
+
+        position = [d.start for d in dd]
+        shp = [d.stop - d.start for d in dd]
+        assert list(volume.shape) == shp
+
+        halo = self._halo
+        data_path = self._path
+
+        path_in_file = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
+
+        # Extract target
+        target_pos = np.array(position - halo)
+        target_shape = np.array(volume.shape)
+        with open_file(data_path, mode='r') as f:
+            target_vol = load_with_zero_padding(
+                f[path_in_file],
+                target_pos, target_pos + target_shape, target_shape, verbose=self._verbose
+            )
+
+        if len(np.unique(target_vol)) == 1 and np.unique(target_vol)[0] == 0:
+            # If nothing is there, just write the volume
+            result = volume
+
+        else:
+
+            # Get all objects that are not fully contained in the volume, i.e. touch the volume edges
+            nfc_ids = get_non_fully_contained_ids(volume)
+
+            # Write the fully contained objects to a result volume
+            result = np.zeros(volume.shape, dtype=volume.dtype)
+            result[np.isin(volume, nfc_ids, invert=True)] = volume[np.isin(volume, nfc_ids, invert=True)]
+            # Add all objects that are also not present in the target
+            result[target_vol == 0] = volume[target_vol == 0]
+
+            # Remove all these objects from the target volume
+            target_vol[result != 0] = 0
+
+            # Get all object ids that are left in the target volume
+            target_ids = np.unique(target_vol)[1:]
+
+            # Relabel the result volume and omit the target_ids
+            result = relabel_with_skip_ids(result, target_ids)
+
+            # Add the objects from the target volume
+            result += target_vol
+
+        return dd, result
+
+    def _apply_stitching(self, dd, volume):
+        """
+        Modifies the target location and source volume according to the stitching method
+        """
+        assert self._stitch_method == 'crop' or self._halo is not None, \
+            'Only crop can be performed without a halo'
+
+        dd, volume = self._stitch_func(dd, volume, self._unique, **self._stitch_kwargs)
+
+        # Update the maximum label
+        if self._update_max_id:
+            self.set_max_id(int(volume.max()))
+
+        return dd, volume
+
     def __setitem__(self, key, value):
 
-        # TODO Do the stitching and stuff here
+        # Do the stitching and stuff here
+        key, value = self._apply_stitching(key, value)
 
         # Now call the super with the properly stitched volume
         super().__setitem__(key, value)
