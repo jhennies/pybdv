@@ -4,7 +4,11 @@ import numpy as np
 from .util import open_file, get_scale_factors, get_key, HDF5_EXTENSIONS
 from .downsample import downsample_in_memory
 from .stitching_utils import load_with_zero_padding, get_non_fully_contained_ids, relabel_with_skip_ids
+from .stitching_utils import get_block_faces, match_ids_at_block_faces
+from .stitching_utils import relabel_from_mapping, iou, largest_non_zero_overlap
 from warnings import warn
+import json
+import pickle
 
 
 def _check_for_out_of_bounds(position, volume, full_shape, verbose=False):
@@ -196,7 +200,7 @@ class BdvDataset:
 class BdvDatasetWithStitching(BdvDataset):
 
     # Use 'crop' for normal images, 'flow' for supervoxels, and 'iou' for segmentations
-    STITCHING_METHODS = ['crop', 'flow', 'iou']
+    STITCHING_METHODS = ['crop', 'flow', 'iou', 'make_mapping']
 
     def __init__(
             self,
@@ -207,6 +211,7 @@ class BdvDatasetWithStitching(BdvDataset):
             halo=None,
             stitch_method='crop',
             stitch_kwargs={},
+            background_value=None,
             unique=False,
             update_max_id=False,
             n_threads=1,
@@ -224,11 +229,12 @@ class BdvDatasetWithStitching(BdvDataset):
         self._stitch_kwargs = stitch_kwargs
         self._update_max_id = update_max_id
         self._unique = unique
+        self._background_value = background_value
 
         if unique:
             warn('Using unique stitching: update_max_id set to True')
             self._update_max_id = True
-        if stitch_method in ['flow', 'iou']:
+        if stitch_method in ['flow', 'iou', 'make_mapping']:
             warn(f'Using {stitch_method}: update_max_id set to True')
             self._update_max_id = True
 
@@ -238,6 +244,11 @@ class BdvDatasetWithStitching(BdvDataset):
             self._stitch_func = self._flow
         elif stitch_method == 'iou':
             raise NotImplementedError
+            # self._stitch_func = self._iou
+        elif stitch_method == 'make_mapping':
+            if not unique:
+                warn(f'Using make_mapping: unique set to True')
+            self._stitch_func = self._make_mapping
         else:
             raise ValueError
 
@@ -274,7 +285,9 @@ class BdvDatasetWithStitching(BdvDataset):
         """
 
         if unique:
-            raise NotImplementedError
+            max_id = self.get_max_id()
+        else:
+            max_id = 0
 
         position = [d.start for d in dd]
         shp = [d.stop - d.start for d in dd]
@@ -287,6 +300,12 @@ class BdvDatasetWithStitching(BdvDataset):
                  halo[1]: -halo[1],
                  halo[2]: -halo[2]
                  ]
+        if unique:
+            if self._background_value is not None:
+                assert self._background_value == 0, 'Only implemented for background value == 0'
+                volume[volume != 0] = volume[volume != 0] + max_id
+            else:
+                volume += max_id
 
         dd = np.s_[
             position[0] + halo[0]: position[0] + shp[0] - halo[0],
@@ -351,6 +370,200 @@ class BdvDatasetWithStitching(BdvDataset):
             result += target_vol
 
         return dd, result
+
+    def _get_halo_blocks(self, shp, pos):
+
+        pos = np.array(pos)
+        halo = np.array(self._halo)
+
+        # Defining the halo as rectangular blocks
+        block_xy0 = np.array([[0, 0, 0], [shp[0], shp[1], halo[2]]])
+        block_xy1 = np.array([[0, 0, shp[2] - halo[2]], [shp[0], shp[1], shp[2]]])
+        block_xz0 = np.array([[0, 0, halo[2]], [shp[0], halo[1], shp[2] - halo[2]]])
+        block_xz1 = np.array([[0, shp[1] - halo[1], halo[2]], [shp[0], shp[1], shp[2] - halo[2]]])
+        block_yz0 = np.array([[0, halo[1], halo[2]], [halo[0], shp[1] - halo[1], shp[2] - halo[2]]])
+        block_yz1 = np.array([[shp[0] - halo[0], halo[1], halo[2]], [shp[0], shp[1] - halo[1], shp[2] - halo[2]]])
+
+        blocks = [block_xy0, block_xy1, block_xz0, block_xz1, block_yz0, block_yz1]
+        blocks_pos = [block + pos for block in blocks]
+
+        return blocks, blocks_pos
+
+    def _load_data_from_blocks(self, blocks):
+
+        data_path = self._path
+        path_in_file = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
+
+        f = open_file(data_path, mode='r')
+        dataset = f[path_in_file]
+        data = [load_with_zero_padding(dataset, block[0], block[1], block[1] - block[0], verbose=self._verbose)
+                for block in blocks]
+        f.close()
+
+        return data
+
+    # @staticmethod
+    # def _flatten_data_blocks(blocks):
+    #
+    #     flat_blocks = [block.flatten() for block in blocks]
+    #     flat_blocks = np.concatenate(flat_blocks, axis=0)
+    #     assert flat_blocks.ndim == 1
+    #
+    #     return flat_blocks
+    #
+    # @staticmethod
+    # def _match_by_iou(src, tgt, labels_to_check=None, min_label_for_non_matched=None):
+    #
+    #     if min_label_for_non_matched is not None:
+    #         assert min_label_for_non_matched > np.unique(tgt)[-1]
+    #
+    #     if labels_to_check is None:
+    #         labels_to_check = np.unique(src)
+    #         labels_to_keep = None
+    #     else:
+    #         # Label has to be in src and labels_to_check
+    #         # print(f'labels_to_check = {labels_to_check}')
+    #         # print(f'np.unique(src) = {np.unique(src)}')
+    #         # print(f'labels_to_check - src = {sorted(list(set(labels_to_check) - set(np.unique(src))))}')
+    #         labels_to_keep = sorted(list(set(labels_to_check) - set(np.unique(src))))
+    #         labels_to_check = list(set(labels_to_check) & set(np.unique(src)))
+    #         # print(f'labels_to_check = {labels_to_check}')
+    #
+    #     print(f'src.shape = {src.shape}')
+    #     print(f'tgt.shape = {tgt.shape}')
+    #
+    #     matches = {}
+    #     c = min_label_for_non_matched
+    #     for lbl in labels_to_check:
+    #
+    #         if lbl > 0:
+    #             # Only the larges component is a suspect (considering we want a IOU of > 0.5 or more)
+    #             print(f'tgt[src == lbl] = {tgt[src == lbl]}')
+    #             tgt_lbl, overlap_ratio = largest_non_zero_overlap(src, tgt, lbl)
+    #             # tgt_lbl = np.unique(tgt[src == lbl])[-1]
+    #             print(f'lbl = {lbl}')
+    #             print(f'tgt_lbl = {tgt_lbl}')
+    #             print(f'overlap_ratio = {overlap_ratio}')
+    #             if tgt_lbl is not None and overlap_ratio > 0.8:
+    #                 print(f'Match found with ratio = {overlap_ratio}')
+    #                 matches[lbl] = tgt_lbl
+    #             else:
+    #                 print('No match found')
+    #                 matches[lbl] = c
+    #                 c += 1
+    #             # print(f'iou = {iou((src == lbl).astype("uint8"), (tgt == tgt_lbl).astype("uint8"))}')
+    #             # if tgt_lbl > 0 and iou((src == lbl).astype('uint8'), (tgt == tgt_lbl).astype('uint8')) > 0.8:
+    #             #     print(f'Match found with iou = {iou(src == lbl, tgt == tgt_lbl)}')
+    #             #     matches[lbl] = tgt_lbl
+    #             # else:
+    #             #     print('No match found')
+    #             #     matches[lbl] = c
+    #             #     c += 1
+    #         matches[0] = 0
+    #
+    #     if labels_to_keep is not None:
+    #         for lidx, lbl in enumerate(labels_to_keep):
+    #             print(f'{lbl}: {c + lidx}')
+    #             matches[lbl] = c + lidx
+    #
+    #     return matches
+    #
+    # def _iou(self, dd, volume, unique=True):
+    #
+    #     assert unique
+    #
+    #     position = np.array([d.start for d in dd])
+    #     halo = np.array(self._halo)
+    #     data_path = self._path
+    #     path_in_file = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
+    #     shp = np.array(volume.shape)
+    #
+    #     # Define the halo blocks
+    #     halo_blocks, target_halo_blocks = self._get_halo_blocks(shp, position)
+    #
+    #     # Get data in halo
+    #     target_halo = self._load_data_from_blocks(target_halo_blocks)
+    #     vol_halo = [load_with_zero_padding(volume, block[0], block[1], block[1] - block[0], verbose=False)
+    #                 for block in halo_blocks]
+    #
+    #     # Flatten the data blocks (pixel locations don't matter here)
+    #     target_halo_flat = self._flatten_data_blocks(target_halo)
+    #     vol_halo_flat = self._flatten_data_blocks(vol_halo)
+    #
+    #     # Crop away the halo from the input volume
+    #     main_vol = volume[
+    #         halo[0]: -halo[0],
+    #         halo[1]: -halo[1],
+    #         halo[2]: -halo[2],
+    #     ]
+    #
+    #     # Make matches using IOU, thus creating the mapping dictionary
+    #     with open_file(data_path, 'r') as f:
+    #         max_id = f[get_key(False, 0, 0, 0)].attrs['maxId']
+    #     mapping = self._match_by_iou(
+    #         vol_halo_flat, target_halo_flat, labels_to_check=np.unique(main_vol), min_label_for_non_matched=max_id + 1)
+    #
+    #     # Do the mapping
+    #     result = relabel_from_mapping(main_vol, mapping)
+    #
+    #     # Update the max id
+    #     with open_file(data_path, 'a') as f:
+    #         if np.max(list(mapping.values())) > max_id:
+    #             f[get_key(False, 0, 0, 0)].attrs['maxId'] = int(np.max(list(mapping.values())))
+    #
+    #     # Adapt the slicing
+    #     dd = np.s_[
+    #         position[0] + halo[0]: position[0] + shp[0] - halo[0],
+    #         position[1] + halo[1]: position[1] + shp[1] - halo[1],
+    #         position[2] + halo[2]: position[2] + shp[2] - halo[2]
+    #     ]
+    #     return dd, result
+
+    def _make_mapping(self, dd, volume, unique, mapping_method='match_block_faces', save_filepath=None):
+        """
+        mapping_method: ['match_block_faces']
+            TODO: implement 'iou'
+        """
+
+        assert unique, 'Stitching method "make_mapping" only works with unique labels'
+        assert self._background_value == 0, 'Only tested using a background value of 0'
+        assert mapping_method in ['match_block_faces'], f'Invalid mapping method: {mapping_method}'
+        assert save_filepath is not None, (
+            'Supply a json (*.json) or pickle (*.pkl) file to save the mapping: '
+            'stitch_kwargs={"save_filepath": "path/to/mapping.json"}'
+        )
+
+        dd, volume = self._crop(dd, volume, unique)
+
+        # The data from the target block has to be one pixel larger in all dimensions
+        tgt_shp = np.array(volume.shape) + 2
+        tgt_pos = np.array([d.start for d in dd]) - 1
+
+        data_path = self._path
+        path_in_file = get_key(self._is_h5, self._timepoint, self._setup_id, 0)
+        # FIXME It is not necessary to load the full volume:
+        # TODO Move the data loading into get_block_faces and load only the block faces
+        with open_file(data_path, mode='r') as f:
+            target_vol = load_with_zero_padding(
+                f[path_in_file],
+                tgt_pos, tgt_pos + tgt_shp, tgt_shp, verbose=self._verbose
+            )
+        block_faces_target = get_block_faces(target_vol)
+        block_faces_vol = get_block_faces(volume)
+
+        mapping = match_ids_at_block_faces(block_faces_vol, block_faces_target, crop=True)
+        print(f'mapping = {mapping}')
+        save_type = os.path.splitext(save_filepath)[1]
+        if save_type == '.json':
+            with open(save_filepath, 'w') as f:
+                json.dump(mapping, f)
+        elif save_type == '.pkl':
+            with open(save_filepath, 'wb') as f:
+                pickle.dump(mapping, f)
+        else:
+            raise ValueError(f'Invalid file type requested: {save_type}')
+
+        return dd, volume
 
     def _apply_stitching(self, dd, volume):
         """
