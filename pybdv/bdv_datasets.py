@@ -19,7 +19,7 @@ def _check_for_out_of_bounds(position, volume, full_shape, verbose=False):
     vol_shape = np.array(volume.shape)
     if position.min() < 0 or (position + vol_shape - full_shape).max() > 0:
 
-        print(f'position = {position}')
+        # print(f'position = {position}')
 
         too_large = (position + vol_shape - full_shape) > 0
         source_ends = vol_shape
@@ -552,7 +552,7 @@ class BdvDatasetWithStitching(BdvDataset):
         block_faces_vol = get_block_faces(volume)
 
         mapping = match_ids_at_block_faces(block_faces_vol, block_faces_target, crop=True)
-        print(f'mapping = {mapping}')
+        # print(f'mapping = {mapping}')
         save_type = os.path.splitext(save_filepath)[1]
         if save_type == '.json':
             with open(save_filepath, 'w') as f:
