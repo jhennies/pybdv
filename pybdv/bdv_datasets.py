@@ -533,6 +533,9 @@ class BdvDatasetWithStitching(BdvDataset):
             'stitch_kwargs={"save_filepath": "path/to/mapping.json"}'
         )
 
+        # To make sure that we don't get an overflow we need to convert the volume to uint64
+        volume = volume.astype('uint64')
+
         dd, volume = self._crop(dd, volume, unique)
 
         # The data from the target block has to be one pixel larger in all dimensions
@@ -576,7 +579,9 @@ class BdvDatasetWithStitching(BdvDataset):
 
         # Update the maximum label
         if self._update_max_id:
-            self.set_max_id(int(volume.max()), compare_with_present=True)
+            vol_max = int(volume.max())
+            print(f'Updating max_id to: {vol_max}')
+            self.set_max_id(vol_max, compare_with_present=True)
 
         return dd, volume
 
