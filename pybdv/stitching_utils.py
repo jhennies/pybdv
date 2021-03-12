@@ -245,8 +245,9 @@ def match_ids_at_block_faces(block_faces, block_faces_ref, crop=False):
             if lbl > 0:
                 ref_lbl, largest_iou = _get_largest_iou(bf_cc, bfr_cc, lbl)
                 if ref_lbl is not None and largest_iou > 0.5:
-                    mappings.append({bf_cc_map[int(lbl)]: bfr_cc_map[int(ref_lbl)]})
+                    mappings.append({int(bf_cc_map[int(lbl)]): int(bfr_cc_map[int(ref_lbl)])})
 
+        print(f'mappings = {mappings}')
         return merge_mappings(mappings)
 
     def _match_ids_at_block_face(block_face, block_face_ref):

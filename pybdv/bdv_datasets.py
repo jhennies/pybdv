@@ -561,8 +561,12 @@ class BdvDatasetWithStitching(BdvDataset):
             with open(save_filepath, 'w') as f:
                 json.dump(mapping, f)
         elif save_type == '.pkl':
-            with open(save_filepath, 'wb') as f:
-                pickle.dump(mapping, f)
+            try:
+                with open(save_filepath, 'wb') as f:
+                    pickle.dump(mapping, f)
+            except TypeError:
+                print(f'mapping = {mapping}')
+                raise
         else:
             raise ValueError(f'Invalid file type requested: {save_type}')
 
