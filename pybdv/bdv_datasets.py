@@ -19,7 +19,7 @@ def _check_for_out_of_bounds(position, volume, full_shape, verbose=False):
     vol_shape = np.array(volume.shape)
     if position.min() < 0 or (position + vol_shape - full_shape).max() > 0:
 
-        print(f'position = {position}')
+        # print(f'position = {position}')
 
         too_large = (position + vol_shape - full_shape) > 0
         source_ends = vol_shape
@@ -533,6 +533,9 @@ class BdvDatasetWithStitching(BdvDataset):
             'stitch_kwargs={"save_filepath": "path/to/mapping.json"}'
         )
 
+        # To make sure that we don't get an overflow we need to convert the volume to uint64
+        volume = volume.astype('uint64')
+
         dd, volume = self._crop(dd, volume, unique)
 
         # The data from the target block has to be one pixel larger in all dimensions
@@ -552,7 +555,7 @@ class BdvDatasetWithStitching(BdvDataset):
         block_faces_vol = get_block_faces(volume)
 
         mapping = match_ids_at_block_faces(block_faces_vol, block_faces_target, crop=True)
-        print(f'mapping = {mapping}')
+        # print(f'mapping = {mapping}')
         save_type = os.path.splitext(save_filepath)[1]
         if save_type == '.json':
             with open(save_filepath, 'w') as f:
@@ -576,7 +579,9 @@ class BdvDatasetWithStitching(BdvDataset):
 
         # Update the maximum label
         if self._update_max_id:
-            self.set_max_id(int(volume.max()), compare_with_present=True)
+            vol_max = int(volume.max())
+            print(f'Updating max_id to: {vol_max}')
+            self.set_max_id(vol_max, compare_with_present=True)
 
         return dd, volume
 
