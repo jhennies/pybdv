@@ -196,13 +196,22 @@ def write_xml_metadata(xml_path, data_path, unit, resolution, is_h5,
         overwrite_data (bool): whether to over-write purely data-related attributes
         enforce_consistency (bool): whether we enforce consistency of the setup attributes
     """
-    # number of timepoints hard-coded to 1
-    setup_name = 'Setup%i' % setup_id if setup_name is None else setup_name
     key = get_key(is_h5, timepoint=timepoint, setup_id=setup_id, scale=0)
     with open_file(data_path, 'r') as f:
         shape = f[key].shape
-
     format_type = 'hdf5' if is_h5 else 'n5'
+
+    _write_xml_metadata(xml_path, data_path, unit, resolution,
+                        format_type, shape,
+                        setup_id, timepoint, setup_name, affine, attributes,
+                        overwrite, overwrite_data, enforce_consistency)
+
+
+def _write_xml_metadata(xml_path, data_path, unit, resolution,
+                        format_type, shape,
+                        setup_id, timepoint, setup_name, affine, attributes,
+                        overwrite, overwrite_data, enforce_consistency):
+    setup_name = 'Setup%i' % setup_id if setup_name is None else setup_name
 
     # check if we have xml with metadata already
     # -> yes we do
@@ -326,6 +335,15 @@ def write_h5_metadata(path, scale_factors, setup_id=0, timepoint=0, overwrite=Fa
 # n5 metadata format is specified here:
 # https://github.com/bigdataviewer/bigdataviewer-core/blob/master/BDV%20N5%20format.md
 def write_n5_metadata(path, scale_factors, resolution, setup_id=0, timepoint=0, overwrite=False):
+
+    def _write_mdata(g, key, data):
+        if key in g.attrs and overwrite:
+            g.attrs[key] = data
+        elif key in g.attrs and not overwrite:
+            return
+        else:
+            g.attrs[key] = data
+
     # build the effective scale factors
     effective_scales = [scale_factors[0]]
     for factor in scale_factors[1:]:
@@ -338,27 +356,20 @@ def write_n5_metadata(path, scale_factors, resolution, setup_id=0, timepoint=0, 
 
         root_key = get_key(False, setup_id=setup_id)
         root = f[root_key]
-        attrs = root.attrs
 
-        # write setup metadata / check for consistency if it already exists
-        if 'downsamplingFactors' in attrs and not overwrite:
-            return
-        root.attrs['downsamplingFactors'] = effective_scales
-
-        if 'dataType' in attrs and not overwrite:
-            return
-        root.attrs['dataType'] = dtype
+        _write_mdata(root, 'downsamplingFactors', effective_scales)
+        _write_mdata(root, 'dataType', dtype)
 
         group_key = get_key(False, timepoint=timepoint, setup_id=setup_id)
         g = f[group_key]
-        g.attrs['multiScale'] = True
-        g.attrs['resolution'] = resolution[::-1]
+        _write_mdata(g, 'multiScale', True)
+        _write_mdata(g, 'resolution', resolution[::-1])
 
         effective_scale = [1, 1, 1]
         for scale_id, factor in enumerate(effective_scales):
             ds = g['s%i' % scale_id]
             effective_scale = [eff * sf for eff, sf in zip(effective_scale, factor)]
-            ds.attrs['downsamplingFactors'] = factor
+            _write_mdata(ds, 'downsamplingFactors', factor)
 
 
 #
@@ -818,6 +829,29 @@ def get_data_path(xml_path, return_absolute_path=False):
         path = os.path.join(os.path.split(xml_path)[0], path)
         path = os.path.abspath(os.path.relpath(path))
     return path
+
+
+def get_name(xml_path, setup_id):
+    et = ET.parse(xml_path).getroot()
+    setups = et.find("SequenceDescription").find("ViewSetups").findall("ViewSetup")
+    for vs in setups:
+        if vs.find('id').text == str(setup_id):
+            return vs.find('name').text
+    raise ValueError("Could not find setup %i" % setup_id)
+
+
+def write_name(xml_path, setup_id, name):
+    root = ET.parse(xml_path).getroot()
+    setups = root.find("SequenceDescription").find("ViewSetups").findall("ViewSetup")
+    for vs in setups:
+        if vs.find('id').text == str(setup_id):
+            node = vs.find('name')
+            node.text = name
+            indent_xml(root)
+            tree = ET.ElementTree(root)
+            tree.write(xml_path)
+            return
+    raise ValueError("Could not find setup %i" % setup_id)
 
 
 #

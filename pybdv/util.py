@@ -1,5 +1,6 @@
 import os
 from itertools import product
+import numpy as np
 
 # check if we have elf and use it's open_file implementation
 try:
@@ -19,19 +20,29 @@ if open_file is None:
 
     try:
         import z5py
+        n5_file = z5py.File
     except ImportError:
-        z5py = None
+        n5_file = None
+
+    if n5_file is None:
+        try:
+            import zarr
+            n5_file = zarr.open
+        except ImportError:
+            n5_file = None
 
     def open_file(path, mode='r'):
         ext = os.path.splitext(path)[1].lower()
         if ext in HDF5_EXTENSIONS:
             return h5py.File(path, mode=mode)
         elif ext in N5_EXTENSIONS:
-            if z5py is None:
-                raise ValueError("Need z5py to open n5 files")
-            return z5py.File(path, mode=mode)
+            if n5_file is None:
+                raise ValueError("Need zarr or z5py to open n5 files")
+            return n5_file(path, mode=mode)
         else:
             raise ValueError(f"Invalid extension: {ext}")
+else:
+    n5_file = open_file
 
 
 def get_key(is_h5, timepoint=None, setup_id=None, scale=None):
@@ -108,6 +119,8 @@ def relative_to_absolute_scale_factors(scale_factors):
 
 
 def grow_bounding_box(bb, halo, shape):
+    if halo is None:
+        return bb, np.s_[:]
     if not (len(bb) == len(halo) == len(shape)):
         raise ValueError("Invalid number of dimensions.")
     bb_grown = tuple(slice(max(b.start - ha, 0), min(b.stop + ha, sh))

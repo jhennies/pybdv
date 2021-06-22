@@ -4,12 +4,7 @@ from abc import ABC
 from shutil import rmtree
 
 import numpy as np
-from pybdv.util import get_key, open_file
-
-try:
-    import z5py
-except ImportError:
-    z5py = None
+from pybdv.util import get_key, open_file, n5_file
 
 
 class MakeBdvTestMixin(ABC):
@@ -287,7 +282,7 @@ class MakeBdvTestMixin(ABC):
 
         shape2 = (72,) * 3
         data2 = np.random.rand(*shape2)
-        sf2 = [[1, 2, 2], [2, 2, 2]]
+        sf2 = [[1, 2, 2], [2, 2, 2]] if mode != 'metadata' else sf1
         attrs2 = {'channel': {'id': 3}, 'angle': {'id': 6}}
         affine2 = np.random.rand(12).tolist()
 
@@ -329,7 +324,7 @@ class TestMakeBdvH5(MakeBdvTestMixin, unittest.TestCase):
     is_h5 = True
 
 
-@unittest.skipUnless(z5py is not None, "Need z5py for n5 support")
+@unittest.skipIf(n5_file is None, "Need zarr or z5py for n5 support")
 class TestMakeBdvN5(MakeBdvTestMixin, unittest.TestCase):
     out_path = './tmp/test.n5'
     is_h5 = False
